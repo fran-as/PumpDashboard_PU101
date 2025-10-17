@@ -566,12 +566,32 @@ else:
 st.header("⚖️ Comparativa Antes vs Después del cambio de ratio")
 
 def subset_period(df_base: pd.DataFrame, running_only: bool = True):
-    before = df_base[df_base["date"] < RATIO_CHANGE_DATE].copy()
-    after = df_base[df_base["date"] >= RATIO_CHANGE_DATE].copy()
+    """Devuelve (before, after) usando comparación robusta por fecha y sin reindex ambiguo."""
+    # 1) Normalizar 'date' como Serie 1-D sin tz
+    date_s = _ensure_date_series(df_base)
+
+    # 2) Reasignar y resetear índice para evitar problemas de etiquetas duplicadas
+    dfb = df_base.assign(date=date_s).reset_index(drop=True)
+
+    # 3) Construir máscaras NumPy con mismo dtype
+    date_vals = dfb["date"].to_numpy(dtype="datetime64[ns]")
+    cut_np = np.datetime64(pd.Timestamp(RATIO_CHANGE_DATE).to_pydatetime(), "ns")
+
+    mask_before = date_vals < cut_np
+    mask_after  = date_vals >= cut_np
+
+    before = dfb.loc[mask_before].copy()
+    after  = dfb.loc[mask_after].copy()
+
+    # 4) Filtrar por "en operación" si corresponde (sin romper si no existe la col)
     if running_only:
-        before = before[before["is_running"]]
-        after = after[after["is_running"]]
+        if "is_running" in before.columns:
+            before = before.loc[before["is_running"].astype(bool)].copy()
+        if "is_running" in after.columns:
+            after = after.loc[after["is_running"].astype(bool)].copy()
+
     return before, after
+
 
 before_all, after_all = subset_period(df_all, running_only=exclude_stops)
 colA, colB = st.columns(2)
