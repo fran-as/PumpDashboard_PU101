@@ -144,13 +144,45 @@ else:
     df = df_all[df_all["date"] >= RATIO_CHANGE_DATE].copy()
     rango_label = "Después del cambio (ratio 4,76)"
 
-# Rango de fechas
-min_d, max_d = df["date"].min(), df["date"].max()
-rango = st.sidebar.date_input("Rango de fechas (acotado al periodo elegido)",
-                              value=(min_d.date(), max_d.date()),
-                              min_value=min_d.date(), max_value=max_d.date())
-d0 = datetime.combine(rango[0], datetime.min.time())
-d1 = datetime.combine(rango[1], datetime.max.time())
+# --- Rango de fechas seguro ---
+if df.empty or df["date"].isna().all():
+    st.warning("No hay datos en el período seleccionado. Cambia el selector 'Periodo de análisis' o carga de datos.")
+    st.stop()
+
+min_d, max_d = pd.to_datetime(df["date"].min()), pd.to_datetime(df["date"].max())
+# fallback defensivo si por algún motivo min/max son NaT
+if pd.isna(min_d) or pd.isna(max_d):
+    st.warning("No se encontraron fechas válidas en el período seleccionado.")
+    st.stop()
+
+# date_input solo con valores válidos
+rango = st.sidebar.date_input(
+    "Rango de fechas (acotado al periodo elegido)",
+    value=(min_d.date(), max_d.date()),
+    min_value=min_d.date(),
+    max_value=max_d.date()
+)
+
+# Normalizar a datetimes (acepta tuple de date o datetime)
+try:
+    if isinstance(rango, tuple) and len(rango) == 2:
+        d0 = datetime.combine(pd.to_datetime(rango[0]).date(), datetime.min.time())
+        d1 = datetime.combine(pd.to_datetime(rango[1]).date(), datetime.max.time())
+    else:
+        d0, d1 = min_d, max_d
+except Exception:
+    d0, d1 = min_d, max_d
+
+# Asegurar orden (por si el usuario invierte fechas)
+if d0 > d1:
+    d0, d1 = d1, d0
+
+df_f = df[(df["date"] >= d0) & (df["date"] <= d1)].copy()
+
+if df_f.empty:
+    st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
+    st.stop()
+
 df_f = df[(df["date"] >= d0) & (df["date"] <= d1)].copy()
 
 # Opción: excluir tiempos sin operación
