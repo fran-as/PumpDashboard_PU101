@@ -144,18 +144,32 @@ else:
     df = df_all[df_all["date"] >= RATIO_CHANGE_DATE].copy()
     rango_label = "Después del cambio (ratio 4,76)"
 
-# --- Rango de fechas seguro ---
-if df.empty or df["date"].isna().all():
-    st.warning("No hay datos en el período seleccionado. Cambia el selector 'Periodo de análisis' o carga de datos.")
+# --- Rango de fechas ROBUSTO ---
+
+# 1) Validar que el DataFrame del período NO esté vacío
+if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    st.warning("No hay datos en el período seleccionado. Cambia el selector 'Periodo de análisis' o el rango.")
     st.stop()
 
-min_d, max_d = pd.to_datetime(df["date"].min()), pd.to_datetime(df["date"].max())
-# fallback defensivo si por algún motivo min/max son NaT
-if pd.isna(min_d) or pd.isna(max_d):
-    st.warning("No se encontraron fechas válidas en el período seleccionado.")
+# 2) Asegurar columna 'date' válida
+if "date" not in df.columns:
+    st.error("No se encontró la columna 'date' en el dataset para el período seleccionado.")
     st.stop()
 
-# date_input solo con valores válidos
+# 3) Forzar a datetime y detectar si hay al menos una fecha válida
+date_coerced = pd.to_datetime(df["date"], errors="coerce")
+valid_mask = date_coerced.notna()
+has_valid_dates = bool(valid_mask.any())
+
+if not has_valid_dates:
+    st.warning("No hay fechas válidas en el período seleccionado.")
+    st.stop()
+
+# 4) min/max sobre fechas válidas únicamente
+min_d = pd.to_datetime(date_coerced[valid_mask].min())
+max_d = pd.to_datetime(date_coerced[valid_mask].max())
+
+# 5) Construir el date_input SOLO con valores válidos
 rango = st.sidebar.date_input(
     "Rango de fechas (acotado al periodo elegido)",
     value=(min_d.date(), max_d.date()),
@@ -163,25 +177,29 @@ rango = st.sidebar.date_input(
     max_value=max_d.date()
 )
 
-# Normalizar a datetimes (acepta tuple de date o datetime)
-try:
-    if isinstance(rango, tuple) and len(rango) == 2:
+# 6) Normalizar el rango elegido a datetimes
+if isinstance(rango, tuple) and len(rango) == 2:
+    try:
         d0 = datetime.combine(pd.to_datetime(rango[0]).date(), datetime.min.time())
         d1 = datetime.combine(pd.to_datetime(rango[1]).date(), datetime.max.time())
-    else:
+    except Exception:
         d0, d1 = min_d, max_d
-except Exception:
+else:
     d0, d1 = min_d, max_d
 
-# Asegurar orden (por si el usuario invierte fechas)
+# 7) Orden defensivo del rango
 if d0 > d1:
     d0, d1 = d1, d0
 
+# 8) Aplicar filtro de fechas usando la serie 'date_coerced'
+df = df.assign(date=date_coerced)
 df_f = df[(df["date"] >= d0) & (df["date"] <= d1)].copy()
 
+# 9) Si el rango deja sin datos, avisar claramente
 if df_f.empty:
     st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
     st.stop()
+
 
 # Opción: excluir tiempos sin operación
 exclude_stops = st.sidebar.checkbox("Excluir tiempos con bomba detenida (recomendado)", value=True)
