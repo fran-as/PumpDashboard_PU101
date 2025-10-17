@@ -205,14 +205,15 @@ if d0 > d1:
     d0, d1 = d1, d0
 
 df = df.assign(date=date_coerced)
-# Asegurar índice único (evita reindex ambiguo en .where/.__getitem__)
 df = df.reset_index(drop=True)
 
-# Usar máscara por valores (no por index alignment) para evitar reindex con duplicados
-date_vals = df["date"].to_numpy()
-mask = (date_vals >= d0) & (date_vals <= d1)
-df_f = df.loc[mask].copy()
+# Comparación con mismo dtype para evitar TypeError
+date_vals = df["date"].to_numpy(dtype="datetime64[ns]")
+d0_np = np.datetime64(pd.Timestamp(d0).to_pydatetime(), "ns")
+d1_np = np.datetime64(pd.Timestamp(d1).to_pydatetime(), "ns")
 
+mask = (date_vals >= d0_np) & (date_vals <= d1_np)
+df_f = df.loc[mask].copy()
 
 if df_f.empty:
     st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
