@@ -98,9 +98,9 @@ def label_of(col: str) -> str:
     suf = f" [{meta['unidad']}]" if meta.get("unidad") and meta["unidad"] != "-" else ""
     return f"{meta['label']}{suf}"
 
-# ---------- Helpers de fecha ----------
+# ---------- Helpers de fecha / columnas ----------
 def _ensure_date_series(dfx: pd.DataFrame) -> pd.Series:
-    """Devuelve una Serie datetime64[ns] robusta y sin timezone para 'date' (aunque haya columnas duplicadas)."""
+    """Serie datetime64[ns] robusta y sin timezone para 'date' (aunque haya columnas duplicadas)."""
     if "date" not in dfx.columns:
         st.error("No se encontró la columna 'date' en el dataset.")
         st.stop()
@@ -118,6 +118,32 @@ def _date_array_np(df_like: pd.DataFrame) -> np.ndarray:
     """Array 1-D datetime64[ns] para ejes X en gráficos."""
     s = _ensure_date_series(df_like)
     return s.to_numpy(dtype="datetime64[ns]")
+
+def _col_series(df_like: pd.DataFrame, colname: str) -> pd.Series:
+    """Serie 1-D para una columna (si hay duplicadas toma la primera) y fuerza numérico si aplica."""
+    col = df_like[colname]
+    if isinstance(col, pd.DataFrame):     # si hay duplicadas, tomar la primera
+        col = col.iloc[:, 0]
+    try:
+        if col.dtype.kind not in ("f", "i"):  # no float/int
+            col = pd.to_numeric(col, errors="coerce")
+    except Exception:
+        col = pd.to_numeric(col, errors="coerce")
+    return col
+
+def _safe_numeric_df(df_like: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Devuelve un DataFrame numérico con nombres únicos para correlación."""
+    out = {}
+    name_count = {}
+    for c in cols:
+        s = _col_series(df_like, c)
+        # garantizar nombre único si hay duplicados
+        name = c
+        if name in out:
+            name_count[name] = name_count.get(name, 1) + 1
+            name = f"{name} ({name_count[c]})"
+        out[name] = s
+    return pd.DataFrame(out)
 
 # ---------- Carga de datos ----------
 @st.cache_data(show_spinner=True)
@@ -276,11 +302,12 @@ for i, r in enumerate(PLAYBOOK):
     c = r["key"]
     if c not in df_use.columns:
         continue
-    ok = rule_ok(df_use[c], r)
+    s = _col_series(df_use, c)
+    ok = rule_ok(s, r)
     pct = float(ok.mean() * 100.0) if len(ok) else np.nan
-    med = float(df_use[c].median()) if c in df_use else np.nan
-    p05 = float(df_use[c].quantile(0.05)) if c in df_use else np.nan
-    p95 = float(df_use[c].quantile(0.95)) if c in df_use else np.nan
+    med = float(s.median()) if len(s) else np.nan
+    p05 = float(s.quantile(0.05)) if len(s) else np.nan
+    p95 = float(s.quantile(0.95)) if len(s) else np.nan
     rows.append({
         "Variable": r["name"], "Columna": c, "Esperado": rule_target_str(r), "Unidad": r["unidad"],
         "Cumplimiento %": round(pct, 1), "Mediana": round(med, 2), "P05": round(p05, 2), "P95": round(p95, 2), "Peso": r["w"],
@@ -314,7 +341,8 @@ if not comp_df.empty:
             c = rr["key"]
             if c not in df_day.columns:
                 continue
-            ok = rule_ok(df_day[c], rr)
+            s = _col_series(df_day, c)
+            ok = rule_ok(s, rr)
             piv = ok.resample("D").mean() * 100.0
             piv.name = rr["name"]
             daily.append(piv)
@@ -333,9 +361,13 @@ if not comp_df.empty:
 
 # ---------- (2) Diagnóstico tren motriz ----------
 st.header("🧠 Diagnóstico tren motriz (330 kW / Velocidad)")
-p95_kw = df_use['PotenciaMotorPU101_kW'].quantile(0.95) if 'PotenciaMotorPU101_kW' in df_use.columns else np.nan
+p_s = _col_series(df_use, 'PotenciaMotorPU101_kW') if 'PotenciaMotorPU101_kW' in df_use.columns else pd.Series(dtype=float)
+v_s = _col_series(df_use, 'VelocidadMotorPU101_percent') if 'VelocidadMotorPU101_percent' in df_use.columns else pd.Series(dtype=float)
+prs_s = _col_series(df_use, 'PresionCiclonesRelaves_psi') if 'PresionCiclonesRelaves_psi' in df_use.columns else pd.Series(dtype=float)
+
+p95_kw = p_s.quantile(0.95) if not p_s.empty else np.nan
 load_p95 = p95_kw / MOTOR_RATED_KW * 100 if pd.notna(p95_kw) else np.nan
-speed_p95 = df_use['VelocidadMotorPU101_percent'].quantile(0.95) if 'VelocidadMotorPU101_percent' in df_use.columns else np.nan
+speed_p95 = v_s.quantile(0.95) if not v_s.empty else np.nan
 score_relev = float((comp_df.loc[comp_df["Variable"].isin(["Presión batería", "Flujo alimentación BHC"]), "Cumplimiento %"].mean())
                     if not comp_df.empty else np.nan)
 
@@ -352,17 +384,15 @@ st.write(f"**Diagnóstico:** {msg}")
 st.subheader("Combinado: %Carga motor vs Presión batería")
 figc = go.Figure()
 x_np = _date_array_np(df_use)
-if 'PotenciaMotorPU101_kW' in df_use.columns:
+if not p_s.empty:
     figc.add_trace(go.Scatter(
-        x=x_np,
-        y=(df_use["PotenciaMotorPU101_kW"]/MOTOR_RATED_KW*100),
+        x=x_np, y=(p_s / MOTOR_RATED_KW * 100).to_numpy(),
         mode="lines", name="%Carga motor (izq)",
         line=dict(color=color_of("Motor_Load_%"))
     ))
-if 'PresionCiclonesRelaves_psi' in df_use.columns:
+if not prs_s.empty:
     figc.add_trace(go.Scatter(
-        x=x_np,
-        y=df_use["PresionCiclonesRelaves_psi"],
+        x=x_np, y=prs_s.to_numpy(),
         mode="lines", name="Presión batería (der)", yaxis="y2",
         line=dict(color=color_of("PresionCiclonesRelaves_psi"))
     ))
@@ -377,11 +407,23 @@ st.header("📌 Estadísticos de las variables seleccionadas")
 if vars_ts:
     use_cols = [c for c in vars_ts if c in df_use.columns]
     if use_cols:
-        stats_df = df_use[use_cols].agg(["max", "min", "mean", "median", "std"]).T.rename(
-            columns={"max": "Máximo", "min": "Mínimo", "mean": "Media", "median": "Mediana", "std": "Desv. Est."}
-        )
-        stats_df.insert(0, "Variable", [label_of(c) for c in stats_df.index])
-        st.dataframe(stats_df.reset_index(drop=True), use_container_width=True)
+        rows_stats = []
+        for c in use_cols:
+            s = _col_series(df_use, c)
+            if s.empty or s.notna().sum() == 0:
+                rows_stats.append({"Variable": label_of(c), "Máximo": np.nan, "Mínimo": np.nan,
+                                   "Media": np.nan, "Mediana": np.nan, "Desv. Est.": np.nan})
+            else:
+                rows_stats.append({
+                    "Variable": label_of(c),
+                    "Máximo": float(s.max()),
+                    "Mínimo": float(s.min()),
+                    "Media": float(s.mean()),
+                    "Mediana": float(s.median()),
+                    "Desv. Est.": float(s.std(ddof=1)) if s.notna().sum() > 1 else 0.0
+                })
+        stats_df = pd.DataFrame(rows_stats)
+        st.dataframe(stats_df, use_container_width=True)
     else:
         st.info("Las variables seleccionadas no están en el dataset filtrado.")
 else:
@@ -400,16 +442,18 @@ x_np = _date_array_np(df_use)
 for i, (col, target) in enumerate(key_series):
     if col not in df_use.columns:
         continue
+    s = _col_series(df_use, col)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x_np, y=df_use[col], mode="lines",
+        x=x_np, y=s.to_numpy(), mode="lines",
         name=label_of(col), line=dict(color=color_of(col))
     ))
     lo, hi = target
     if lo is not None and hi is not None:
         fig.add_hrect(y0=lo, y1=hi, fillcolor="green", opacity=0.15, line_width=0)
     elif lo is not None:
-        fig.add_hrect(y0=lo, y1=max(df_use[col].max(), lo), fillcolor="green", opacity=0.10, line_width=0)
+        ymax = float(np.nanmax(s.to_numpy())) if s.notna().any() else lo
+        fig.add_hrect(y0=lo, y1=max(ymax, lo), fillcolor="green", opacity=0.10, line_width=0)
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Fecha", yaxis_title=label_of(col))
     grid[i % 2].plotly_chart(fig, use_container_width=True)
 
@@ -420,10 +464,14 @@ if not vars_ts:
 else:
     use_cols = [c for c in vars_ts if c in df_use.columns]
     if use_cols:
-        scales = {
-            c: (df_use[c].quantile(0.95) - df_use[c].quantile(0.05)) if df_use[c].notna().any() else 0.0
-            for c in use_cols
-        }
+        # --- Escalas robustas ---
+        scales = {}
+        series_map = {}
+        for c in use_cols:
+            s = _col_series(df_use, c)
+            series_map[c] = s
+            scales[c] = (s.quantile(0.95) - s.quantile(0.05)) if s.notna().any() else 0.0
+
         ratio = (max(scales.values()) / max(min(scales.values()), 1e-9)) if len(scales) > 1 else 1.0
         y2_vars = []
         if ratio > 8:
@@ -433,9 +481,10 @@ else:
         fig = go.Figure()
         x_np = _date_array_np(df_use)
         for c in use_cols:
+            s = series_map[c]
             axis = "y2" if c in y2_vars else "y"
             fig.add_trace(go.Scatter(
-                x=x_np, y=df_use[c], mode="lines", name=label_of(c), yaxis=axis,
+                x=x_np, y=s.to_numpy(), mode="lines", name=label_of(c), yaxis=axis,
                 line=dict(color=color_of(c))
             ))
         fig.update_layout(
@@ -456,9 +505,15 @@ if len(avail) >= 2:
     c1, c2 = st.columns(2)
     x_var = c1.selectbox("Variable X", options=avail, index=0, key="xvar")
     y_var = c2.selectbox("Variable Y", options=avail, index=1, key="yvar")
-    sc = px.scatter(df_use, x=x_var, y=y_var, trendline=TRENDLINE_MODE,
-                    labels={x_var: label_of(x_var), y_var: label_of(y_var)},
-                    color_discrete_sequence=[color_of(y_var)])
+    # Para evitar ambigüedad por duplicados, pasamos arrays explícitos a px.scatter
+    x_s = _col_series(df_use, x_var)
+    y_s = _col_series(df_use, y_var)
+    sc = px.scatter(
+        x=x_s, y=y_s,
+        trendline=TRENDLINE_MODE,
+        labels={"x": label_of(x_var), "y": label_of(y_var)},
+        color_discrete_sequence=[color_of(y_var)]
+    )
     if TRENDLINE_MODE is None:
         st.caption("Nota: no se muestra recta de tendencia porque 'statsmodels' no está instalado.")
     st.plotly_chart(sc, use_container_width=True)
@@ -470,7 +525,8 @@ st.header("🧮 Correlación")
 if len(vars_corr) >= 2:
     use_corr = [c for c in vars_corr if c in df_use.columns]
     if len(use_corr) >= 2:
-        corr = df_use[use_corr].corr(numeric_only=True)
+        corr_df = _safe_numeric_df(df_use, use_corr)
+        corr = corr_df.corr(numeric_only=True)
         heat = px.imshow(corr, text_auto=True, aspect="auto",
                          color_continuous_scale="RdBu_r", zmin=-1, zmax=1, labels=dict(color="ρ"))
         heat.update_layout(margin=dict(l=10, r=10, t=10, b=10))
@@ -485,15 +541,17 @@ st.header("📦 Box & Whisker")
 all_numeric = [c for c in df_use.columns if c not in ["date", "Reducer_Ratio", "is_running"]]
 if all_numeric:
     box_var = st.selectbox("Atributo", options=all_numeric, index=0, key="boxvar")
-    serie = df_use[box_var].dropna()
+    serie = _col_series(df_use, box_var).dropna()
     if len(serie) > 0:
         q1, med, q3 = serie.quantile(0.25), serie.quantile(0.50), serie.quantile(0.75)
         iqr = q3 - q1
         w_low = serie[serie >= (q1 - 1.5 * iqr)].min() if len(serie) else np.nan
         w_high = serie[serie <= (q3 + 1.5 * iqr)].max() if len(serie) else np.nan
-        box = px.box(df_use, y=box_var, points="outliers",
-                     labels={box_var: label_of(box_var)},
-                     color_discrete_sequence=[color_of(box_var)])
+        box = px.box(
+            y=serie, points="outliers",
+            labels={"y": label_of(box_var)},
+            color_discrete_sequence=[color_of(box_var)]
+        )
         st.plotly_chart(box, use_container_width=True)
         st.dataframe(pd.DataFrame({
             "Parámetro": ["Q1", "Mediana", "Q3", "Bigote inferior", "Bigote superior"],
@@ -526,35 +584,33 @@ for label, dset, col in [
         if dset.empty:
             st.info("Sin datos en este periodo.")
             continue
+        p_s2 = _col_series(dset, 'PotenciaMotorPU101_kW') if 'PotenciaMotorPU101_kW' in dset.columns else pd.Series(dtype=float)
+        v_s2 = _col_series(dset, 'VelocidadMotorPU101_percent') if 'VelocidadMotorPU101_percent' in dset.columns else pd.Series(dtype=float)
+        prs_s2 = _col_series(dset, 'PresionCiclonesRelaves_psi') if 'PresionCiclonesRelaves_psi' in dset.columns else pd.Series(dtype=float)
+
         k1, k2, k3 = st.columns(3)
-        if 'PotenciaMotorPU101_kW' in dset.columns:
-            k1.metric("Potencia P95 (kW)", f"{dset['PotenciaMotorPU101_kW'].quantile(0.95):.1f}")
-        else:
-            k1.metric("Potencia P95 (kW)", "–")
-        if 'VelocidadMotorPU101_percent' in dset.columns:
-            k2.metric("Velocidad motor P95 (%)", f"{dset['VelocidadMotorPU101_percent'].quantile(0.95):.1f}")
-        else:
-            k2.metric("Velocidad motor P95 (%)", "–")
-        if 'PresionCiclonesRelaves_psi' in dset.columns:
-            k3.metric("Presión batería mediana (psi)", f"{dset['PresionCiclonesRelaves_psi'].median():.2f}")
-        else:
-            k3.metric("Presión batería mediana (psi)", "–")
+        k1.metric("Potencia P95 (kW)", f"{p_s2.quantile(0.95):.1f}" if not p_s2.empty else "–")
+        k2.metric("Velocidad motor P95 (%)", f"{v_s2.quantile(0.95):.1f}" if not v_s2.empty else "–")
+        k3.metric("Presión batería mediana (psi)", f"{prs_s2.median():.2f}" if not prs_s2.empty else "–")
 
         sub = []
         for r in PLAYBOOK[:4]:
             if r["key"] not in dset.columns:
                 continue
-            ok = rule_ok(dset[r["key"]], r)
+            s = _col_series(dset, r["key"])
+            ok = rule_ok(s, r)
             sub.append({"Variable": r["name"], "Cumplimiento %": round(float(ok.mean()*100), 1)})
         if sub:
             st.dataframe(pd.DataFrame(sub), use_container_width=True)
 
-        if 'PotenciaMotorPU101_kW' in dset.columns:
-            fig_box_pwr = px.box(dset, y="PotenciaMotorPU101_kW", points="outliers",
+        if not p_s2.empty:
+            fig_box_pwr = px.box(y=p_s2, points="outliers",
+                                 labels={"y": label_of("PotenciaMotorPU101_kW")},
                                  color_discrete_sequence=[color_of("PotenciaMotorPU101_kW")])
             st.plotly_chart(fig_box_pwr, use_container_width=True)
-        if 'PresionCiclonesRelaves_psi' in dset.columns:
-            fig_box_prs = px.box(dset, y="PresionCiclonesRelaves_psi", points="outliers",
+        if not prs_s2.empty:
+            fig_box_prs = px.box(y=prs_s2, points="outliers",
+                                 labels={"y": label_of("PresionCiclonesRelaves_psi")},
                                  color_discrete_sequence=[color_of("PresionCiclonesRelaves_psi")])
             st.plotly_chart(fig_box_prs, use_container_width=True)
 
