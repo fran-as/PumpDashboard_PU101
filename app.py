@@ -183,8 +183,6 @@ if df_f.empty:
     st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
     st.stop()
 
-df_f = df[(df["date"] >= d0) & (df["date"] <= d1)].copy()
-
 # Opción: excluir tiempos sin operación
 exclude_stops = st.sidebar.checkbox("Excluir tiempos con bomba detenida (recomendado)", value=True)
 df_use = df_f[df_f["is_running"]].copy() if exclude_stops else df_f.copy()
