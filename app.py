@@ -6,6 +6,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# Trendline opcional (lo usaremos, ya que agregaste statsmodels)
+try:
+    import statsmodels.api as sm  # noqa: F401
+    TRENDLINE_MODE = "ols"
+except Exception:
+    TRENDLINE_MODE = None
+
 DATA_PATH = os.path.join("Data", "dataset.xlsx")
 DATA_SHEET = "Hoja1"  # cambia aquí si tu hoja tiene otro nombre
 
@@ -30,19 +37,16 @@ ATTR = {
     "PotenciaMotorPU101_kW": {"label": "Potencia motor PU101", "unidad": "kW", "categoria": "Bomba"},
     "VelocidadMotorPU101_percent": {"label": "Velocidad motor PU101", "unidad": "%", "categoria": "Bomba"},
     "VelocidadBombaPU101_rpm": {"label": "Velocidad bomba PU101", "unidad": "rpm", "categoria": "Bomba"},
-
     "VibraciónEjeEntradaReductorPU101_mxs": {"label": "Vib. eje entrada reductor (x)", "unidad": "m/s²", "categoria": "Vibración"},
     "VibraciónEjeSalidaReductorPU101_mxs": {"label": "Vib. eje salida reductor (x)", "unidad": "m/s²", "categoria": "Vibración"},
     "VibraciónEjeEntradaReductorPU101_mxs2": {"label": "Vib. eje entrada reductor (y)", "unidad": "m/s²", "categoria": "Vibración"},
     "VibraciónEjeEntradaReductorPU101_mxs3": {"label": "Vib. eje entrada reductor (z)", "unidad": "m/s²", "categoria": "Vibración"},
-
     "NivelCubaTK101_percent": {"label": "Nivel cuba TK101", "unidad": "%", "categoria": "Tanque/Espesador"},
     "DescargaEspesadorRelaves_m3xh": {"label": "Descarga espesador relaves", "unidad": "m³/h", "categoria": "Tanque/Espesador"},
     "FlujoDilucion_m3xh": {"label": "Flujo de dilución", "unidad": "m³/h", "categoria": "Proceso"},
     "ContenidoSolidosSalidaEspesadorRelaves_percent": {"label": "Sólidos salida espesador", "unidad": "%", "categoria": "Tanque/Espesador"},
 }
 
-# helper para etiquetas bonitas
 def label_of(col: str) -> str:
     meta = ATTR.get(col, None)
     if not meta:
@@ -56,11 +60,9 @@ def label_of(col: str) -> str:
 @st.cache_data(show_spinner=True)
 def load_data(path: str, sheet: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
-    # Normalizaciones
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
-    # Mantener solo columnas conocidas + tolerante a extras
     cols = [c for c in df.columns if (c == "date") or (c in ATTR)]
     df = df[cols]
     return df.reset_index(drop=True)
@@ -76,7 +78,6 @@ df = load_data(DATA_PATH, DATA_SHEET)
 # -------------------------
 st.sidebar.title("🔎 Filtros")
 
-# Rango de fechas
 min_d, max_d = df["date"].min(), df["date"].max()
 rango = st.sidebar.date_input(
     "Rango de fechas",
@@ -93,7 +94,6 @@ else:
 mask = (df["date"] >= d0) & (df["date"] <= d1)
 df_f = df.loc[mask].copy()
 
-# Filtro por categoría
 categorias = ["Todas"] + sorted(set(meta["categoria"] for k, meta in ATTR.items() if k != "date"))
 cat_sel = st.sidebar.selectbox("Categoría de variables", categorias, index=0)
 
@@ -102,21 +102,18 @@ if cat_sel == "Todas":
 else:
     opciones_cols = [c for c, meta in ATTR.items() if meta.get("categoria") == cat_sel]
 
-# Selección de variables para la serie temporal
 vars_ts = st.sidebar.multiselect(
     "Variables a graficar (serie temporal)",
     options=opciones_cols,
     default=[c for c in opciones_cols[:3]]
 )
 
-# Selección de variables para correlación
 vars_corr = st.sidebar.multiselect(
     "Variables para correlación",
     options=[c for c in df.columns if c != "date"],
     default=[c for c in opciones_cols[:6]]
 )
 
-# Descarga de CSV filtrado
 st.sidebar.download_button(
     "⬇️ Descargar CSV filtrado",
     data=df_f.to_csv(index=False).encode("utf-8"),
@@ -131,52 +128,77 @@ st.title("💧 PumpDashboard PU101")
 st.caption("Explora condiciones de proceso, operación de bomba y vibraciones.")
 
 # -------------------------
-# 5) KPIs
+# 5) Sección 1: Estadísticos (máx, mín, media, mediana, std)
 # -------------------------
-col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-
-def kpi(col, serie, titulo, fmt="{:,.2f}"):
-    if serie in df_f.columns:
-        val = df_f[serie].mean()
-        unidad = ATTR.get(serie, {}).get("unidad", "")
-        col.metric(titulo, fmt.format(val) + (f" {unidad}" if unidad else ""))
-    else:
-        col.metric(titulo, "–")
-
-kpi(col_kpi1, "PotenciaMotorPU101_kW", "Potencia media")
-kpi(col_kpi2, "TorqueMotorPU101_Nm", "Torque medio")
-kpi(col_kpi3, "VelocidadBombaPU101_rpm", "Velocidad bomba media")
-kpi(col_kpi4, "ContenidoSolidosSalidaEspesadorRelaves_percent", "Sólidos salida (%)")
+st.subheader("📌 Estadísticos de las variables seleccionadas")
+if vars_ts:
+    stats_df = df_f[vars_ts].agg(
+        ["max", "min", "mean", "median", "std"]
+    ).T.rename(
+        columns={"max": "Máximo", "min": "Mínimo", "mean": "Media", "median": "Mediana", "std": "Desv. Est."}
+    )
+    # Agregar unidades y etiquetas bonitas
+    stats_df.insert(0, "Variable", [label_of(c) for c in stats_df.index])
+    stats_df = stats_df.reset_index(drop=True)
+    st.dataframe(stats_df, use_container_width=True)
+else:
+    st.info("Selecciona variables en la barra lateral para calcular estadísticos.")
 
 # -------------------------
-# 6) Serie temporal
+# 6) Serie temporal con doble eje Y (auto-escala)
 # -------------------------
-st.subheader("📈 Serie temporal")
+st.subheader("📈 Serie temporal (ejes izquierdo y derecho)")
 
 if not vars_ts:
     st.info("Selecciona una o más variables en la barra lateral para ver la serie temporal.")
 else:
+    # Medida de escala robusta: rango entre p95 y p05
+    scales = {
+        c: (df_f[c].quantile(0.95) - df_f[c].quantile(0.05)) if df_f[c].notna().any() else 0.0
+        for c in vars_ts
+    }
+    # Si hay mucha diferencia, mandamos las de menor escala al eje derecho
+    if len(scales) > 1 and (max(scales.values()) > 0):
+        ratio = (max(scales.values()) / max(min(scales.values()), 1e-9))
+    else:
+        ratio = 1.0
+
+    # Regla simple: si la razón de escalas > 8, enviamos al eje derecho las que
+    # estén por debajo de la mediana de escala.
+    if ratio > 8:
+        threshold = np.median(list(scales.values()))
+        y2_vars = [c for c, s in scales.items() if s <= threshold]
+    else:
+        y2_vars = []
+
     fig = go.Figure()
     for c in vars_ts:
+        axis = "y2" if c in y2_vars else "y"
         fig.add_trace(
             go.Scatter(
-                x=df_f["date"],
-                y=df_f[c],
-                mode="lines",
-                name=label_of(c)
+                x=df_f["date"], y=df_f[c], mode="lines", name=label_of(c), yaxis=axis
             )
         )
+
     fig.update_layout(
         xaxis_title="Fecha",
-        yaxis_title="Valor",
+        yaxis_title="Eje izquierdo",
         legend_title="Variables",
         hovermode="x unified",
-        margin=dict(l=10, r=10, t=10, b=10)
+        margin=dict(l=10, r=10, t=10, b=10),
+        yaxis2=dict(
+            title="Eje derecho",
+            overlaying="y",
+            side="right",
+            showgrid=False
+        ),
     )
+    if y2_vars:
+        st.caption("Nota: Se enviaron al **eje derecho** las variables: " + ", ".join([label_of(c) for c in y2_vars]))
     st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------
-# 7) Dispersión rápida (comparar dos variables)
+# 7) Dispersión (comparar dos variables)
 # -------------------------
 st.subheader("🔗 Comparación (dispersión)")
 c1, c2 = st.columns(2)
@@ -185,10 +207,12 @@ y_var = c2.selectbox("Variable Y", options=[c for c in df.columns if c != "date"
 
 sc = px.scatter(
     df_f, x=x_var, y=y_var,
-    trendline="ols",
+    trendline=TRENDLINE_MODE,
     labels={x_var: label_of(x_var), y_var: label_of(y_var)},
     title=None
 )
+if TRENDLINE_MODE is None:
+    st.caption("Nota: no se muestra recta de tendencia porque 'statsmodels' no está instalado.")
 st.plotly_chart(sc, use_container_width=True)
 
 # -------------------------
@@ -208,11 +232,44 @@ else:
     st.info("Elige al menos 2 variables para calcular correlaciones.")
 
 # -------------------------
-# 9) Tabla + Diccionario
+# 9) Box & Whisker
+# -------------------------
+st.subheader("📦 Box & Whisker")
+all_numeric = [c for c in df.columns if c != "date"]
+box_var = st.selectbox("Atributo", options=all_numeric, index=0, key="boxvar")
+
+# Cálculo de parámetros (Q1, mediana, Q3, bigotes)
+serie = df_f[box_var].dropna()
+q1 = serie.quantile(0.25)
+median = serie.quantile(0.50)
+q3 = serie.quantile(0.75)
+iqr = q3 - q1
+whisker_low = serie[serie >= (q1 - 1.5 * iqr)].min() if len(serie) else np.nan
+whisker_high = serie[serie <= (q3 + 1.5 * iqr)].max() if len(serie) else np.nan
+
+box = px.box(
+    df_f, y=box_var,
+    points="outliers",
+    labels={box_var: label_of(box_var)},
+    title=None
+)
+st.plotly_chart(box, use_container_width=True)
+
+params_df = pd.DataFrame({
+    "Parámetro": ["Q1", "Mediana", "Q3", "Bigote inferior", "Bigote superior"],
+    "Valor": [q1, median, q3, whisker_low, whisker_high],
+})
+st.dataframe(params_df, use_container_width=True)
+
+# -------------------------
+# 10) Datos filtrados
 # -------------------------
 st.subheader("🗂️ Datos filtrados")
 st.dataframe(df_f, use_container_width=True, height=350)
 
+# -------------------------
+# 11) Diccionario
+# -------------------------
 st.subheader("📚 Diccionario de variables")
 dict_df = pd.DataFrame([
     {"columna": k, "etiqueta": v["label"], "unidad": v["unidad"], "categoria": v["categoria"]}
