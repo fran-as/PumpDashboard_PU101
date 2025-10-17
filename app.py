@@ -145,6 +145,23 @@ def _safe_numeric_df(df_like: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
         out[name] = s
     return pd.DataFrame(out)
 
+def _unique_columns(df_like: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve un DataFrame con nombres de columnas únicos, preservando el orden.
+       Si hay duplicados, agrega sufijos ' (2)', ' (3)', etc.
+    """
+    counts = {}
+    new_cols = []
+    for c in df_like.columns:
+        if c in counts:
+            counts[c] += 1
+            new_cols.append(f"{c} ({counts[c]})")
+        else:
+            counts[c] = 1
+            new_cols.append(c)
+    out = df_like.copy()
+    out.columns = new_cols
+    return out
+
 # ---------- Carga de datos ----------
 @st.cache_data(show_spinner=True)
 def load_data(path: str, sheet: str) -> pd.DataFrame:
@@ -270,10 +287,11 @@ vars_corr = st.sidebar.multiselect(
 )
 st.sidebar.download_button(
     "⬇️ Descargar CSV filtrado",
-    data=df_use.to_csv(index=False).encode("utf-8"),
+    data=_unique_columns(df_use).to_csv(index=False).encode("utf-8"),
     file_name=f"dataset_filtrado_{periodo.replace(' ','_')}.csv",
     mime="text/csv"
 )
+
 
 # ---------- Header ----------
 st.title("💧 PumpDashboard PU101")
@@ -636,7 +654,9 @@ for label, dset, col in [
 
 # ---------- (10) Datos y Diccionario ----------
 st.header("🗂️ Datos filtrados")
-st.dataframe(df_use, use_container_width=True, height=350)
+df_display = _unique_columns(df_use)
+st.dataframe(df_display, use_container_width=True, height=350)
+
 
 st.header("📚 Diccionario de variables")
 dict_df = pd.DataFrame([
