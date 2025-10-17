@@ -99,7 +99,9 @@ def label_of(col: str) -> str:
 
 # ---------- HELPERS DE CARGA Y FECHA ----------
 def _ensure_date_series(dfx: pd.DataFrame) -> pd.Series:
-    """Devuelve una Serie datetime robusta para la columna 'date', incluso si hay columnas duplicadas."""
+    """Devuelve una Serie datetime robusta para la columna 'date', incluso si hay columnas duplicadas.
+       También elimina timezone para comparar sin errores.
+    """
     if "date" not in dfx.columns:
         st.error("No se encontró la columna 'date' en el dataset.")
         st.stop()
@@ -107,7 +109,14 @@ def _ensure_date_series(dfx: pd.DataFrame) -> pd.Series:
     # Si hay columnas 'date' duplicadas, esto será un DataFrame: tomar la primera
     if isinstance(col, pd.DataFrame):
         col = col.iloc[:, 0]
-    return pd.to_datetime(col, errors="coerce")
+    s = pd.to_datetime(col, errors="coerce", utc=False)
+    # 👉 Eliminar timezone si llega tz-aware (evita TypeError en comparaciones)
+    try:
+        s = s.dt.tz_localize(None)
+    except Exception:
+        pass
+    return s
+
 
 @st.cache_data(show_spinner=True)
 def load_data(path: str, sheet: str) -> pd.DataFrame:
