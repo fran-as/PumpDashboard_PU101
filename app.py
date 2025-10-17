@@ -303,28 +303,56 @@ if not comp_df.empty:
     st.success(f"**Score de cumplimiento (presión/flujo/ciclones): {score:.1f} %**")
     st.dataframe(comp_df.drop(columns=["Peso"]), use_container_width=True)
 
-    # Tiempo en rango por día
-    st.subheader("⏱️ Tiempo en rango por día")
+    # Tiempo en rango por día (robusto contra 'date' duplicada / no 1-D)
+st.subheader("⏱️ Tiempo en rango por día")
+
+if df_use.empty or "date" not in df_use.columns:
+    st.info("Sin datos/fecha para calcular tiempo en rango por día.")
+else:
+    # Coaccionar 'date' de forma robusta y asegurar 1-D + sin NaT
+    date_day = _ensure_date_series(df_use)
+    df_day = (
+        df_use.assign(__date=date_day)
+              .dropna(subset=["__date"])
+              .reset_index(drop=True)
+              .set_index("__date")
+              .sort_index()
+    )
+
     daily = []
-    df_day = df_use.set_index("date").copy()
     for r in PLAYBOOK:
         c = r["key"]
         if c not in df_day.columns:
             continue
-        ok = rule_ok(df_day[c], r).astype(int)
+        # rule_ok ya trabaja sobre Series y mantiene índice datetime
+        ok = rule_ok(df_day[c], r)
+        # media diaria del booleano → % tiempo en rango
         piv = ok.resample("D").mean() * 100.0
         piv.name = r["name"]
         daily.append(piv)
+
     if daily:
-        m = pd.concat(daily, axis=1)
+        m = pd.concat(daily, axis=1).sort_index()
         figb = go.Figure()
-        # coloreamos por key original para consistencia
+        # Colorear con el color fijo de cada 'key'
         for r in PLAYBOOK:
-            if r["name"] in m.columns:
-                figb.add_bar(x=m.index, y=m[r["name"]], name=r["name"], marker_color=color_of(r["key"]))
-        figb.update_layout(barmode="group", yaxis_title="% tiempo en rango",
-                           hovermode="x", margin=dict(l=10, r=10, t=10, b=10))
+            name = r["name"]
+            if name in m.columns:
+                figb.add_bar(
+                    x=m.index,
+                    y=m[name],
+                    name=name,
+                    marker_color=color_of(r["key"])
+                )
+        figb.update_layout(
+            barmode="group",
+            yaxis_title="% tiempo en rango",
+            hovermode="x",
+            margin=dict(l=10, r=10, t=10, b=10)
+        )
         st.plotly_chart(figb, use_container_width=True)
+    else:
+        st.info("No hay variables del playbook disponibles en este período.")
 
 # --------------- (2) DIAGNÓSTICO TREN MOTRIZ ---------------
 st.header("🧠 Diagnóstico tren motriz (330 kW / Velocidad)")
