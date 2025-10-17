@@ -196,7 +196,14 @@ if d0 > d1:
     d0, d1 = d1, d0
 
 df = df.assign(date=date_coerced)
-df_f = df[(df["date"] >= d0) & (df["date"] <= d1)].copy()
+# Asegurar índice único (evita reindex ambiguo en .where/.__getitem__)
+df = df.reset_index(drop=True)
+
+# Usar máscara por valores (no por index alignment) para evitar reindex con duplicados
+date_vals = df["date"].to_numpy()
+mask = (date_vals >= d0) & (date_vals <= d1)
+df_f = df.loc[mask].copy()
+
 
 if df_f.empty:
     st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
