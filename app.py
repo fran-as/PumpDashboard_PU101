@@ -6,13 +6,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Trendline (OLS si está statsmodels)
+# --- Trendline (OLS si está statsmodels) ---
 try:
     import statsmodels.api as sm  # noqa: F401
     TRENDLINE_MODE = "ols"
 except Exception:
     TRENDLINE_MODE = None
 
+# --- Rutas y hoja ---
 DATA_PATH = os.path.join("Data", "dataset.xlsx")
 DATA_SHEET = "Hoja1"
 
@@ -27,7 +28,7 @@ RATIO_CHANGE_DATE = datetime(2025, 9, 26)
 RUN_MIN_KW = 5.0
 RUN_MIN_SPEED_PCT = 5.0
 
-# --------------- COLORES CONSISTENTES ---------------
+# --- Colores consistentes ---
 COLOR_MAP = {
     "PresionCiclonesRelaves_psi":            "#1f77b4",
     "FlujoAlimCiclonesRelaves_m3xh":         "#ff7f0e",
@@ -53,7 +54,7 @@ def color_of(col: str) -> str:
     idx = abs(hash(col)) % len(palette)
     return palette[idx]
 
-# --------------- METADATOS Y PLAYBOOK ---------------
+# --- Metadatos y Playbook ---
 ATTR = {
     "date": {"label": "Fecha", "unidad": "-", "categoria": "Tiempo", "fmt": "datetime"},
     "PresionCiclonesRelaves_psi": {"label": "Presión batería", "unidad": "psi", "categoria": "Proceso"},
@@ -97,39 +98,40 @@ def label_of(col: str) -> str:
     suf = f" [{meta['unidad']}]" if meta.get("unidad") and meta["unidad"] != "-" else ""
     return f"{meta['label']}{suf}"
 
-# ---------- HELPERS DE CARGA Y FECHA ----------
+# ---------- Helpers de fecha ----------
 def _ensure_date_series(dfx: pd.DataFrame) -> pd.Series:
-    """Devuelve una Serie datetime robusta para la columna 'date', incluso si hay columnas duplicadas.
-       También elimina timezone para comparar sin errores.
-    """
+    """Devuelve una Serie datetime64[ns] robusta y sin timezone para 'date' (aunque haya columnas duplicadas)."""
     if "date" not in dfx.columns:
         st.error("No se encontró la columna 'date' en el dataset.")
         st.stop()
     col = dfx["date"]
-    # Si hay columnas 'date' duplicadas, esto será un DataFrame: tomar la primera
-    if isinstance(col, pd.DataFrame):
+    if isinstance(col, pd.DataFrame):  # si hay duplicadas, quedará DF: tomar la primera
         col = col.iloc[:, 0]
     s = pd.to_datetime(col, errors="coerce", utc=False)
-    # 👉 Eliminar timezone si llega tz-aware (evita TypeError en comparaciones)
     try:
         s = s.dt.tz_localize(None)
     except Exception:
         pass
     return s
 
+def _date_array_np(df_like: pd.DataFrame) -> np.ndarray:
+    """Array 1-D datetime64[ns] para ejes X en gráficos."""
+    s = _ensure_date_series(df_like)
+    return s.to_numpy(dtype="datetime64[ns]")
 
+# ---------- Carga de datos ----------
 @st.cache_data(show_spinner=True)
 def load_data(path: str, sheet: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
 
-    # 1) Quitar columnas duplicadas (mantiene la primera)
+    # Quitar columnas duplicadas (mantiene la primera)
     df = df.loc[:, ~pd.Index(df.columns).duplicated()].copy()
 
-    # 2) Normalizar 'date'
+    # Normalizar 'date'
     date_s = _ensure_date_series(df)
-    df = df.assign(date=date_s).sort_values("date")
+    df = df.assign(date=date_s).sort_values("date").reset_index(drop=True)
 
-    # 3) Derivadas por ratio y operación
+    # Derivadas por ratio y operación
     df["Reducer_Ratio"] = np.where(df["date"] < RATIO_CHANGE_DATE, RATIO_OLD, RATIO_NEW)
     df["Motor_RPM_calc"] = (df.get("VelocidadMotorPU101_percent", 0) / 100.0) * MOTOR_MAX_RPM_50HZ
     df["Bomba_RPM_calc"] = df["Motor_RPM_calc"] / df["Reducer_Ratio"]
@@ -141,7 +143,7 @@ def load_data(path: str, sheet: str) -> pd.DataFrame:
            [c for c in ATTR if c in df.columns]
     return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
 
-# ---------- APP ----------
+# ---------- App ----------
 st.set_page_config(page_title="PumpDashboard PU101", page_icon="💧", layout="wide")
 
 if not os.path.exists(DATA_PATH):
@@ -150,7 +152,7 @@ if not os.path.exists(DATA_PATH):
 
 df_all = load_data(DATA_PATH, DATA_SHEET)
 
-# --------------- SIDEBAR ---------------
+# ---------- Sidebar ----------
 st.sidebar.title("🔎 Filtros")
 
 periodo = st.sidebar.radio(
@@ -159,15 +161,11 @@ periodo = st.sidebar.radio(
     index=0
 )
 
-# --- Subconjunto por periodo (ROBUSTO) ---
-# Asegurar que 'date' en df_all sea una Serie datetime64[ns] sin tz
+# Subconjunto por periodo (robusto)
 date_all = _ensure_date_series(df_all)
 df_all = df_all.assign(date=date_all).reset_index(drop=True)
-
-# Pasar todo a numpy para comparar sin ambigüedad
 date_vals_all = df_all["date"].to_numpy(dtype="datetime64[ns]")
 cut_np = np.datetime64(pd.Timestamp(RATIO_CHANGE_DATE).to_pydatetime(), "ns")
-
 mask_before = date_vals_all < cut_np
 mask_after  = date_vals_all >= cut_np
 
@@ -181,12 +179,11 @@ else:
     df = df_all.loc[mask_after].copy()
     rango_label = "Después del cambio (ratio 4,76)"
 
-# --- Rango de fechas ROBUSTO ---
+# Rango de fechas robusto
 if df is None or not isinstance(df, pd.DataFrame) or df.empty:
     st.warning("No hay datos en el período seleccionado. Cambia el selector 'Periodo de análisis' o el rango.")
     st.stop()
 
-# Forzar 'date' a datetime seguro (por si el subset reintroduce ambigüedad)
 date_coerced = _ensure_date_series(df)
 valid_mask = date_coerced.notna()
 if not bool(valid_mask.any()):
@@ -211,26 +208,20 @@ if isinstance(rango, tuple) and len(rango) == 2:
         d0, d1 = min_d, max_d
 else:
     d0, d1 = min_d, max_d
-
 if d0 > d1:
     d0, d1 = d1, d0
 
-df = df.assign(date=date_coerced)
-df = df.reset_index(drop=True)
-
-# Comparación con mismo dtype para evitar TypeError
+df = df.assign(date=date_coerced).reset_index(drop=True)
 date_vals = df["date"].to_numpy(dtype="datetime64[ns]")
 d0_np = np.datetime64(pd.Timestamp(d0).to_pydatetime(), "ns")
 d1_np = np.datetime64(pd.Timestamp(d1).to_pydatetime(), "ns")
-
 mask = (date_vals >= d0_np) & (date_vals <= d1_np)
 df_f = df.loc[mask].copy()
-
 if df_f.empty:
     st.warning("El rango de fechas seleccionado no contiene datos. Ajusta el rango o el período.")
     st.stop()
 
-# Opción: excluir tiempos sin operación
+# Excluir tiempos sin operación
 exclude_stops = st.sidebar.checkbox("Excluir tiempos con bomba detenida (recomendado)", value=True)
 df_use = df_f[df_f["is_running"]].copy() if exclude_stops else df_f.copy()
 
@@ -241,14 +232,16 @@ opciones_cols = [c for c in df_use.columns if c not in ["date", "Reducer_Ratio",
 if cat_sel != "Todas":
     opciones_cols = [c for c in opciones_cols if ATTR.get(c, {}).get("categoria") == cat_sel]
 
-vars_ts = st.sidebar.multiselect("Variables a graficar (serie temporal)",
-                                 options=opciones_cols,
-                                 default=[c for c in opciones_cols[:3]])
-
-vars_corr = st.sidebar.multiselect("Variables para correlación",
-                                   options=[c for c in df_use.columns if c not in ["date", "Reducer_Ratio", "is_running"]],
-                                   default=[c for c in opciones_cols[:6]])
-
+vars_ts = st.sidebar.multiselect(
+    "Variables a graficar (serie temporal)",
+    options=opciones_cols,
+    default=[c for c in opciones_cols[:3]]
+)
+vars_corr = st.sidebar.multiselect(
+    "Variables para correlación",
+    options=[c for c in df_use.columns if c not in ["date", "Reducer_Ratio", "is_running"]],
+    default=[c for c in opciones_cols[:6]]
+)
 st.sidebar.download_button(
     "⬇️ Descargar CSV filtrado",
     data=df_use.to_csv(index=False).encode("utf-8"),
@@ -256,14 +249,14 @@ st.sidebar.download_button(
     mime="text/csv"
 )
 
-# --------------- HEADER ---------------
+# ---------- Header ----------
 st.title("💧 PumpDashboard PU101")
 st.caption(f"Enfoque en ciclones y tren motriz | {rango_label}")
 st.caption(f"📊 Análisis sobre {'tiempo en operación' if exclude_stops else 'todo el tiempo'} "
            f"(Operación: Potencia>{RUN_MIN_KW} kW y Velocidad>{RUN_MIN_SPEED_PCT}%).")
 st.caption(f"🧮 Muestras analizadas: {len(df_use):,}")
 
-# --------------- UTILIDADES ---------------
+# ---------- Utilidades ----------
 def rule_ok(series: pd.Series, r: dict) -> pd.Series:
     s = series.dropna()
     if r["type"] == "range":
@@ -275,7 +268,7 @@ def rule_ok(series: pd.Series, r: dict) -> pd.Series:
 def rule_target_str(r: dict) -> str:
     return f"{r['min']}–{r['max']} {r['unidad']}" if r["type"] == "range" else f"≥ {r['min']} {r['unidad']}"
 
-# --------------- (1) ESTADO VS PLAYBOOK ---------------
+# ---------- (1) Estado vs Playbook ----------
 st.header("📘 Estado vs Playbook (Ciclones)")
 rows = []
 cards = st.columns(min(4, len(PLAYBOOK)))
@@ -285,9 +278,9 @@ for i, r in enumerate(PLAYBOOK):
         continue
     ok = rule_ok(df_use[c], r)
     pct = float(ok.mean() * 100.0) if len(ok) else np.nan
-    med = float(df_use[c].median())
-    p05 = float(df_use[c].quantile(0.05))
-    p95 = float(df_use[c].quantile(0.95))
+    med = float(df_use[c].median()) if c in df_use else np.nan
+    p05 = float(df_use[c].quantile(0.05)) if c in df_use else np.nan
+    p95 = float(df_use[c].quantile(0.95)) if c in df_use else np.nan
     rows.append({
         "Variable": r["name"], "Columna": c, "Esperado": rule_target_str(r), "Unidad": r["unidad"],
         "Cumplimiento %": round(pct, 1), "Mediana": round(med, 2), "P05": round(p05, 2), "P95": round(p95, 2), "Peso": r["w"],
@@ -303,58 +296,42 @@ if not comp_df.empty:
     st.success(f"**Score de cumplimiento (presión/flujo/ciclones): {score:.1f} %**")
     st.dataframe(comp_df.drop(columns=["Peso"]), use_container_width=True)
 
-    # Tiempo en rango por día (robusto contra 'date' duplicada / no 1-D)
-st.subheader("⏱️ Tiempo en rango por día")
-
-if df_use.empty or "date" not in df_use.columns:
-    st.info("Sin datos/fecha para calcular tiempo en rango por día.")
-else:
-    # Coaccionar 'date' de forma robusta y asegurar 1-D + sin NaT
-    date_day = _ensure_date_series(df_use)
-    df_day = (
-        df_use.assign(__date=date_day)
-              .dropna(subset=["__date"])
-              .reset_index(drop=True)
-              .set_index("__date")
-              .sort_index()
-    )
-
-    daily = []
-    for r in PLAYBOOK:
-        c = r["key"]
-        if c not in df_day.columns:
-            continue
-        # rule_ok ya trabaja sobre Series y mantiene índice datetime
-        ok = rule_ok(df_day[c], r)
-        # media diaria del booleano → % tiempo en rango
-        piv = ok.resample("D").mean() * 100.0
-        piv.name = r["name"]
-        daily.append(piv)
-
-    if daily:
-        m = pd.concat(daily, axis=1).sort_index()
-        figb = go.Figure()
-        # Colorear con el color fijo de cada 'key'
-        for r in PLAYBOOK:
-            name = r["name"]
-            if name in m.columns:
-                figb.add_bar(
-                    x=m.index,
-                    y=m[name],
-                    name=name,
-                    marker_color=color_of(r["key"])
-                )
-        figb.update_layout(
-            barmode="group",
-            yaxis_title="% tiempo en rango",
-            hovermode="x",
-            margin=dict(l=10, r=10, t=10, b=10)
-        )
-        st.plotly_chart(figb, use_container_width=True)
+    # Tiempo en rango por día (robusto)
+    st.subheader("⏱️ Tiempo en rango por día")
+    if df_use.empty or "date" not in df_use.columns:
+        st.info("Sin datos/fecha para calcular tiempo en rango por día.")
     else:
-        st.info("No hay variables del playbook disponibles en este período.")
+        date_day = _ensure_date_series(df_use)
+        df_day = (
+            df_use.assign(__date=date_day)
+                  .dropna(subset=["__date"])
+                  .reset_index(drop=True)
+                  .set_index("__date")
+                  .sort_index()
+        )
+        daily = []
+        for rr in PLAYBOOK:
+            c = rr["key"]
+            if c not in df_day.columns:
+                continue
+            ok = rule_ok(df_day[c], rr)
+            piv = ok.resample("D").mean() * 100.0
+            piv.name = rr["name"]
+            daily.append(piv)
+        if daily:
+            m = pd.concat(daily, axis=1).sort_index()
+            figb = go.Figure()
+            for rr in PLAYBOOK:
+                nm = rr["name"]
+                if nm in m.columns:
+                    figb.add_bar(x=m.index, y=m[nm], name=nm, marker_color=color_of(rr["key"]))
+            figb.update_layout(barmode="group", yaxis_title="% tiempo en rango",
+                               hovermode="x", margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(figb, use_container_width=True)
+        else:
+            st.info("No hay variables del playbook disponibles en este período.")
 
-# --------------- (2) DIAGNÓSTICO TREN MOTRIZ ---------------
+# ---------- (2) Diagnóstico tren motriz ----------
 st.header("🧠 Diagnóstico tren motriz (330 kW / Velocidad)")
 p95_kw = df_use['PotenciaMotorPU101_kW'].quantile(0.95) if 'PotenciaMotorPU101_kW' in df_use.columns else np.nan
 load_p95 = p95_kw / MOTOR_RATED_KW * 100 if pd.notna(p95_kw) else np.nan
@@ -374,15 +351,20 @@ st.write(f"**Diagnóstico:** {msg}")
 
 st.subheader("Combinado: %Carga motor vs Presión batería")
 figc = go.Figure()
+x_np = _date_array_np(df_use)
 if 'PotenciaMotorPU101_kW' in df_use.columns:
     figc.add_trace(go.Scatter(
-        x=df_use["date"], y=(df_use["PotenciaMotorPU101_kW"]/MOTOR_RATED_KW*100),
-        mode="lines", name="%Carga motor (izq)", line=dict(color=color_of("Motor_Load_%"))
+        x=x_np,
+        y=(df_use["PotenciaMotorPU101_kW"]/MOTOR_RATED_KW*100),
+        mode="lines", name="%Carga motor (izq)",
+        line=dict(color=color_of("Motor_Load_%"))
     ))
 if 'PresionCiclonesRelaves_psi' in df_use.columns:
     figc.add_trace(go.Scatter(
-        x=df_use["date"], y=df_use["PresionCiclonesRelaves_psi"],
-        mode="lines", name="Presión batería (der)", yaxis="y2", line=dict(color=color_of("PresionCiclonesRelaves_psi"))
+        x=x_np,
+        y=df_use["PresionCiclonesRelaves_psi"],
+        mode="lines", name="Presión batería (der)", yaxis="y2",
+        line=dict(color=color_of("PresionCiclonesRelaves_psi"))
     ))
     figc.add_hrect(y0=19, y1=20, fillcolor="green", opacity=0.15, line_width=0, yref="y2")
 figc.update_layout(xaxis_title="Fecha", yaxis_title="%Carga motor",
@@ -390,7 +372,7 @@ figc.update_layout(xaxis_title="Fecha", yaxis_title="%Carga motor",
                    hovermode="x unified", margin=dict(l=10, r=10, t=10, b=10))
 st.plotly_chart(figc, use_container_width=True)
 
-# --------------- (3) ESTADÍSTICOS ---------------
+# ---------- (3) Estadísticos ----------
 st.header("📌 Estadísticos de las variables seleccionadas")
 if vars_ts:
     use_cols = [c for c in vars_ts if c in df_use.columns]
@@ -405,7 +387,7 @@ if vars_ts:
 else:
     st.info("Selecciona variables en la barra lateral para calcular estadísticos.")
 
-# --------------- (4) SERIES CON BANDAS OBJETIVO ---------------
+# ---------- (4) Series con bandas objetivo ----------
 st.header("📈 Series con bandas objetivo (ciclones)")
 key_series = [
     ("PresionCiclonesRelaves_psi", (19, 20)),
@@ -414,12 +396,13 @@ key_series = [
     ("CiclonesAbiertos_cant", (7, 8)),
 ]
 grid = st.columns(2)
+x_np = _date_array_np(df_use)
 for i, (col, target) in enumerate(key_series):
     if col not in df_use.columns:
         continue
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df_use["date"], y=df_use[col], mode="lines",
+        x=x_np, y=df_use[col], mode="lines",
         name=label_of(col), line=dict(color=color_of(col))
     ))
     lo, hi = target
@@ -430,7 +413,7 @@ for i, (col, target) in enumerate(key_series):
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Fecha", yaxis_title=label_of(col))
     grid[i % 2].plotly_chart(fig, use_container_width=True)
 
-# --------------- (5) SERIE TEMPORAL GENERAL (doble eje) ---------------
+# ---------- (5) Serie temporal general (doble eje) ----------
 st.header("📈 Serie temporal (multi-variable, doble eje)")
 if not vars_ts:
     st.info("Selecciona una o más variables en la barra lateral para ver la serie temporal.")
@@ -448,10 +431,11 @@ else:
             y2_vars = [c for c, s in scales.items() if s <= threshold]
 
         fig = go.Figure()
+        x_np = _date_array_np(df_use)
         for c in use_cols:
             axis = "y2" if c in y2_vars else "y"
             fig.add_trace(go.Scatter(
-                x=df_use["date"], y=df_use[c], mode="lines", name=label_of(c), yaxis=axis,
+                x=x_np, y=df_use[c], mode="lines", name=label_of(c), yaxis=axis,
                 line=dict(color=color_of(c))
             ))
         fig.update_layout(
@@ -465,7 +449,7 @@ else:
     else:
         st.info("Las variables seleccionadas no están en el dataset filtrado.")
 
-# --------------- (6) DISPERSIÓN ---------------
+# ---------- (6) Dispersión ----------
 st.header("🔗 Comparación (dispersión)")
 avail = [c for c in df_use.columns if c not in ["date", "Reducer_Ratio", "is_running"]]
 if len(avail) >= 2:
@@ -481,7 +465,7 @@ if len(avail) >= 2:
 else:
     st.info("No hay suficientes variables disponibles para la dispersión.")
 
-# --------------- (7) CORRELACIÓN ---------------
+# ---------- (7) Correlación ----------
 st.header("🧮 Correlación")
 if len(vars_corr) >= 2:
     use_corr = [c for c in vars_corr if c in df_use.columns]
@@ -496,7 +480,7 @@ if len(vars_corr) >= 2:
 else:
     st.info("Elige al menos 2 variables para calcular correlaciones.")
 
-# --------------- (8) BOX & WHISKER ---------------
+# ---------- (8) Box & Whisker ----------
 st.header("📦 Box & Whisker")
 all_numeric = [c for c in df_use.columns if c not in ["date", "Reducer_Ratio", "is_running"]]
 if all_numeric:
@@ -520,7 +504,7 @@ if all_numeric:
 else:
     st.info("No hay variables numéricas para el boxplot.")
 
-# --------------- (9) NUEVA SECCIÓN: COMPARATIVA ANTES VS DESPUÉS ---------------
+# ---------- (9) Comparativa Antes vs Después ----------
 st.header("⚖️ Comparativa Antes vs Después del cambio de ratio")
 
 def subset_period(df_base: pd.DataFrame, running_only: bool = True):
@@ -542,7 +526,6 @@ for label, dset, col in [
         if dset.empty:
             st.info("Sin datos en este periodo.")
             continue
-        # KPIs
         k1, k2, k3 = st.columns(3)
         if 'PotenciaMotorPU101_kW' in dset.columns:
             k1.metric("Potencia P95 (kW)", f"{dset['PotenciaMotorPU101_kW'].quantile(0.95):.1f}")
@@ -557,9 +540,8 @@ for label, dset, col in [
         else:
             k3.metric("Presión batería mediana (psi)", "–")
 
-        # Cumplimiento Playbook claves
         sub = []
-        for r in PLAYBOOK[:4]:  # presión, flujo, ciclones, cyclowash
+        for r in PLAYBOOK[:4]:
             if r["key"] not in dset.columns:
                 continue
             ok = rule_ok(dset[r["key"]], r)
@@ -567,7 +549,6 @@ for label, dset, col in [
         if sub:
             st.dataframe(pd.DataFrame(sub), use_container_width=True)
 
-        # Box comparativo de potencia y presión
         if 'PotenciaMotorPU101_kW' in dset.columns:
             fig_box_pwr = px.box(dset, y="PotenciaMotorPU101_kW", points="outliers",
                                  color_discrete_sequence=[color_of("PotenciaMotorPU101_kW")])
@@ -577,7 +558,7 @@ for label, dset, col in [
                                  color_discrete_sequence=[color_of("PresionCiclonesRelaves_psi")])
             st.plotly_chart(fig_box_prs, use_container_width=True)
 
-# --------------- (10) DATOS Y DICCIONARIO ---------------
+# ---------- (10) Datos y Diccionario ----------
 st.header("🗂️ Datos filtrados")
 st.dataframe(df_use, use_container_width=True, height=350)
 
