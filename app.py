@@ -159,15 +159,26 @@ periodo = st.sidebar.radio(
     index=0
 )
 
-# Subconjunto por periodo
+# --- Subconjunto por periodo (ROBUSTO) ---
+# Asegurar que 'date' en df_all sea una Serie datetime64[ns] sin tz
+date_all = _ensure_date_series(df_all)
+df_all = df_all.assign(date=date_all).reset_index(drop=True)
+
+# Pasar todo a numpy para comparar sin ambigüedad
+date_vals_all = df_all["date"].to_numpy(dtype="datetime64[ns]")
+cut_np = np.datetime64(pd.Timestamp(RATIO_CHANGE_DATE).to_pydatetime(), "ns")
+
+mask_before = date_vals_all < cut_np
+mask_after  = date_vals_all >= cut_np
+
 if periodo == "Completo":
     df = df_all.copy()
     rango_label = "Periodo completo"
 elif periodo == "Antes del 26/09/2025 (≤ 25/09)":
-    df = df_all[df_all["date"] < RATIO_CHANGE_DATE].copy()
+    df = df_all.loc[mask_before].copy()
     rango_label = "Antes del cambio (ratio 5,78)"
 else:
-    df = df_all[df_all["date"] >= RATIO_CHANGE_DATE].copy()
+    df = df_all.loc[mask_after].copy()
     rango_label = "Después del cambio (ratio 4,76)"
 
 # --- Rango de fechas ROBUSTO ---
